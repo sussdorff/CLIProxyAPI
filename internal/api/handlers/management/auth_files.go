@@ -434,7 +434,64 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	if metadata := authListMetadata(auth); len(metadata) > 0 {
+		entry["metadata"] = metadata
+	}
 	return entry
+}
+
+// The generic plugin quota contract lets any plugin publish normalized quota
+// windows that a manager UI can render without a provider-specific adapter. It
+// travels under one auth-metadata key and carries consumption only.
+const (
+	pluginQuotaMetadataKey = "plugin_quota"
+	pluginQuotaSchema      = "cliproxy.plugin.quota"
+	// maxPluginQuotaMetadataBytes bounds the encoded contract so an oversized
+	// plugin payload cannot inflate every entry of the management response.
+	maxPluginQuotaMetadataBytes = 64 << 10
+)
+
+// authListMetadata returns the auth metadata a management client may observe.
+// Auth metadata also holds credential material - refresh tokens, access tokens,
+// id tokens, cookies, profile paths, persisted storage - so nothing is exposed
+// by default. Only the keys named here are copied; every other key, known or
+// unknown, stays omitted.
+func authListMetadata(auth *coreauth.Auth) map[string]any {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	quota, ok := pluginQuotaMetadata(auth.Metadata[pluginQuotaMetadataKey])
+	if !ok {
+		return nil
+	}
+	return map[string]any{pluginQuotaMetadataKey: quota}
+}
+
+// pluginQuotaMetadata copies the plugin quota contract into a detached,
+// JSON-safe value. The payload is copied only when it identifies itself as the
+// contract, so an unrelated value parked under the key is never republished.
+// Fields inside a well-formed contract are copied verbatim: the contract adds
+// optional fields without a version bump, and re-listing them here would drop
+// data a newer producer publishes.
+func pluginQuotaMetadata(raw any) (map[string]any, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil || len(encoded) > maxPluginQuotaMetadataBytes {
+		return nil, false
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(encoded, &payload); errUnmarshal != nil {
+		return nil, false
+	}
+	if schema, _ := payload["schema"].(string); schema != pluginQuotaSchema {
+		return nil, false
+	}
+	if _, ok := payload["version"].(float64); !ok {
+		return nil, false
+	}
+	return payload, true
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
