@@ -431,6 +431,35 @@ func TestPluginQuotaMetadataBoundsWindowsAndText(t *testing.T) {
 
 // An oversized encoded payload must not reach the response even when every
 // individual field is within its own bound.
+func TestPluginQuotaMetadataProjectsSpendAndDailyAllowlist(t *testing.T) {
+	payload := pluginQuotaContractFixture()
+	payload["spend"] = map[string]any{
+		"currency": "USD", "metered_cents": 98655, "today_cents": 458,
+		"period_cents": 124717, "latest_tokens": 2_900_000, "period_tokens": 1.1e9,
+		"period_days": 30, "cookie": "WorkosCursorSessionToken=secret",
+	}
+	payload["daily"] = []any{
+		map[string]any{"date": "2026-08-26", "cost_cents": 19800, "tokens": 12_000, "raw_event": "drop-me"},
+		map[string]any{"date": "bad", "cost_cents": 1},
+	}
+	quota, ok := pluginQuotaMetadata(payload)
+	if !ok {
+		t.Fatal("contract with spend was rejected")
+	}
+	spend, _ := quota["spend"].(map[string]any)
+	if spend["metered_cents"] != float64(98655) || spend["cookie"] != nil {
+		t.Fatalf("spend projection = %#v", spend)
+	}
+	daily, _ := quota["daily"].([]any)
+	if len(daily) != 1 {
+		t.Fatalf("daily = %#v", daily)
+	}
+	day := daily[0].(map[string]any)
+	if day["date"] != "2026-08-26" || day["raw_event"] != nil {
+		t.Fatalf("daily row = %#v", day)
+	}
+}
+
 func TestPluginQuotaMetadataKeepsEncodedSizeBound(t *testing.T) {
 	payload := pluginQuotaContractFixture()
 	windows := make([]any, 0, 4096)

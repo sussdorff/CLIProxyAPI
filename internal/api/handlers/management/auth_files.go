@@ -457,6 +457,7 @@ const (
 	// can place on an entry through the allowlisted fields themselves.
 	maxPluginQuotaWindows   = 32
 	maxPluginQuotaTextBytes = 256
+	maxPluginQuotaDailyDays = 32
 )
 
 // The version-1 field allowlists. Auth metadata is plugin-controlled all the
@@ -475,6 +476,13 @@ var (
 	pluginQuotaWindowStringFields = []string{"label", "kind", "unit", "window_start", "window_end", "reset_at", "reset_accuracy"}
 	pluginQuotaWindowNumberFields = []string{"used", "limit", "remaining", "used_percent"}
 	pluginQuotaWindowBoolFields   = []string{"unlimited"}
+
+	pluginQuotaSpendStringFields = []string{"currency"}
+	pluginQuotaSpendNumberFields = []string{
+		"metered_cents", "today_cents", "period_cents", "latest_tokens", "period_tokens", "period_days",
+	}
+	pluginQuotaDailyStringFields = []string{"date"}
+	pluginQuotaDailyNumberFields = []string{"cost_cents", "tokens"}
 )
 
 // authListMetadata returns the auth metadata a management client may observe.
@@ -530,6 +538,12 @@ func pluginQuotaMetadata(raw any) (map[string]any, bool) {
 	copyAllowlistedStrings(projected, payload, pluginQuotaStringFields)
 	copyAllowlistedNumbers(projected, payload, pluginQuotaNumberFields)
 	projected["windows"] = projectPluginQuotaWindows(payload["windows"])
+	if spend, ok := projectPluginQuotaSpend(payload["spend"]); ok {
+		projected["spend"] = spend
+	}
+	if daily := projectPluginQuotaDaily(payload["daily"]); len(daily) > 0 {
+		projected["daily"] = daily
+	}
 	return projected, true
 }
 
@@ -580,6 +594,45 @@ func projectPluginQuotaWindows(raw any) []any {
 		windows = append(windows, window)
 	}
 	return windows
+}
+
+func projectPluginQuotaSpend(raw any) (map[string]any, bool) {
+	source, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	spend := map[string]any{}
+	copyAllowlistedStrings(spend, source, pluginQuotaSpendStringFields)
+	copyAllowlistedNumbers(spend, source, pluginQuotaSpendNumberFields)
+	if len(spend) == 0 {
+		return nil, false
+	}
+	return spend, true
+}
+
+func projectPluginQuotaDaily(raw any) []any {
+	items, _ := raw.([]any)
+	days := make([]any, 0, len(items))
+	for _, item := range items {
+		if len(days) >= maxPluginQuotaDailyDays {
+			break
+		}
+		source, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		date, ok := source["date"].(string)
+		if !ok || len(date) != 10 || len(date) > maxPluginQuotaTextBytes {
+			continue
+		}
+		day := map[string]any{"date": date}
+		copyAllowlistedNumbers(day, source, pluginQuotaDailyNumberFields)
+		if _, hasCost := day["cost_cents"]; !hasCost {
+			continue
+		}
+		days = append(days, day)
+	}
+	return days
 }
 
 // copyAllowlistedStrings copies the named text fields when present and within
