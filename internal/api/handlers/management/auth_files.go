@@ -434,7 +434,229 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	if metadata := authListMetadata(auth); len(metadata) > 0 {
+		entry["metadata"] = metadata
+	}
 	return entry
+}
+
+// The generic plugin quota contract lets any plugin publish normalized quota
+// windows that a manager UI can render without a provider-specific adapter. It
+// travels under one auth-metadata key and carries consumption only.
+const (
+	pluginQuotaMetadataKey = "plugin_quota"
+	pluginQuotaSchema      = "cliproxy.plugin.quota"
+	// pluginQuotaSupportedVersion is the only contract version this build knows
+	// how to project. A payload announcing any other version is not published,
+	// because its fields cannot be assumed to still mean what is assumed here.
+	pluginQuotaSupportedVersion = 1
+	// maxPluginQuotaMetadataBytes bounds the encoded contract so an oversized
+	// plugin payload cannot inflate every entry of the management response.
+	maxPluginQuotaMetadataBytes = 64 << 10
+	// maxPluginQuotaWindows and maxPluginQuotaTextBytes bound what one plugin
+	// can place on an entry through the allowlisted fields themselves.
+	maxPluginQuotaWindows   = 32
+	maxPluginQuotaTextBytes = 256
+	maxPluginQuotaDailyDays = 32
+)
+
+// The version-1 field allowlists. Auth metadata is plugin-controlled all the
+// way down, so a well-formed envelope is no evidence that what it wraps is
+// safe: the payload is projected field by field instead of copied, and any key
+// not named here is dropped wherever it appears. That is what stops a hostile
+// plugin from smuggling a token, cookie, profile path, or raw upstream body to
+// the management API by nesting it inside an otherwise valid contract.
+//
+// schema, version and availability are handled separately because they are
+// required and validated rather than merely copied; id is required per window.
+var (
+	pluginQuotaStringFields = []string{"provider", "observed_at"}
+	pluginQuotaNumberFields = []string{"ttl_seconds"}
+
+	pluginQuotaWindowStringFields = []string{"label", "kind", "unit", "window_start", "window_end", "reset_at", "reset_accuracy"}
+	pluginQuotaWindowNumberFields = []string{"used", "limit", "remaining", "used_percent"}
+	pluginQuotaWindowBoolFields   = []string{"unlimited"}
+
+	pluginQuotaSpendStringFields = []string{"currency"}
+	pluginQuotaSpendNumberFields = []string{
+		"metered_cents", "today_cents", "period_cents", "latest_tokens", "period_tokens", "period_days",
+	}
+	pluginQuotaDailyStringFields = []string{"date"}
+	pluginQuotaDailyNumberFields = []string{"cost_cents", "tokens"}
+)
+
+// authListMetadata returns the auth metadata a management client may observe.
+// Auth metadata also holds credential material - refresh tokens, access tokens,
+// id tokens, cookies, profile paths, persisted storage - so nothing is exposed
+// by default. Only the keys named here are copied; every other key, known or
+// unknown, stays omitted.
+func authListMetadata(auth *coreauth.Auth) map[string]any {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	quota, ok := pluginQuotaMetadata(auth.Metadata[pluginQuotaMetadataKey])
+	if !ok {
+		return nil
+	}
+	return map[string]any{pluginQuotaMetadataKey: quota}
+}
+
+// pluginQuotaMetadata projects the plugin quota contract onto a detached,
+// JSON-safe value built from the version-1 allowlist. Nothing is passed
+// through: the result is assembled from named fields, so a field the plugin
+// invented is dropped rather than republished.
+//
+// A malformed required envelope field fails the whole contract, since without
+// schema, version, or availability a consumer cannot tell an observation from a
+// placeholder. A malformed window is dropped on its own instead, matching how
+// the consumer treats a window it cannot identify.
+//
+// Rejecting a payload never touches credential availability: the auth keeps its
+// own status and stays in rotation with no quota to display.
+func pluginQuotaMetadata(raw any) (map[string]any, bool) {
+	payload, ok := decodePluginQuotaPayload(raw)
+	if !ok {
+		return nil, false
+	}
+	if schema, _ := payload["schema"].(string); schema != pluginQuotaSchema {
+		return nil, false
+	}
+	version, okVersion := payload["version"].(float64)
+	if !okVersion || version != pluginQuotaSupportedVersion {
+		return nil, false
+	}
+	availability, okAvailability := payload["availability"].(string)
+	if !okAvailability || len(availability) > maxPluginQuotaTextBytes {
+		return nil, false
+	}
+
+	projected := map[string]any{
+		"schema":       pluginQuotaSchema,
+		"version":      version,
+		"availability": availability,
+	}
+	copyAllowlistedStrings(projected, payload, pluginQuotaStringFields)
+	copyAllowlistedNumbers(projected, payload, pluginQuotaNumberFields)
+	projected["windows"] = projectPluginQuotaWindows(payload["windows"])
+	if spend, ok := projectPluginQuotaSpend(payload["spend"]); ok {
+		projected["spend"] = spend
+	}
+	if daily := projectPluginQuotaDaily(payload["daily"]); len(daily) > 0 {
+		projected["daily"] = daily
+	}
+	return projected, true
+}
+
+// decodePluginQuotaPayload detaches the plugin's value through a bounded JSON
+// round trip, so the response encoder never walks a map a plugin still holds
+// and an oversized payload is refused before it is inspected.
+func decodePluginQuotaPayload(raw any) (map[string]any, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil || len(encoded) > maxPluginQuotaMetadataBytes {
+		return nil, false
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(encoded, &payload); errUnmarshal != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+// projectPluginQuotaWindows keeps only windows that carry a usable identity.
+// The result is always non-nil so an unavailable contract serializes as an
+// empty list rather than as null.
+func projectPluginQuotaWindows(raw any) []any {
+	items, _ := raw.([]any)
+	windows := make([]any, 0, len(items))
+	for _, item := range items {
+		if len(windows) >= maxPluginQuotaWindows {
+			break
+		}
+		source, okSource := item.(map[string]any)
+		if !okSource {
+			continue
+		}
+		id, okID := source["id"].(string)
+		if !okID || strings.TrimSpace(id) == "" || len(id) > maxPluginQuotaTextBytes {
+			continue
+		}
+		window := map[string]any{"id": id}
+		copyAllowlistedStrings(window, source, pluginQuotaWindowStringFields)
+		copyAllowlistedNumbers(window, source, pluginQuotaWindowNumberFields)
+		for _, field := range pluginQuotaWindowBoolFields {
+			if value, okValue := source[field].(bool); okValue {
+				window[field] = value
+			}
+		}
+		windows = append(windows, window)
+	}
+	return windows
+}
+
+func projectPluginQuotaSpend(raw any) (map[string]any, bool) {
+	source, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	spend := map[string]any{}
+	copyAllowlistedStrings(spend, source, pluginQuotaSpendStringFields)
+	copyAllowlistedNumbers(spend, source, pluginQuotaSpendNumberFields)
+	if len(spend) == 0 {
+		return nil, false
+	}
+	return spend, true
+}
+
+func projectPluginQuotaDaily(raw any) []any {
+	items, _ := raw.([]any)
+	days := make([]any, 0, len(items))
+	for _, item := range items {
+		if len(days) >= maxPluginQuotaDailyDays {
+			break
+		}
+		source, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		date, ok := source["date"].(string)
+		if !ok || len(date) != 10 || len(date) > maxPluginQuotaTextBytes {
+			continue
+		}
+		day := map[string]any{"date": date}
+		copyAllowlistedNumbers(day, source, pluginQuotaDailyNumberFields)
+		if _, hasCost := day["cost_cents"]; !hasCost {
+			continue
+		}
+		days = append(days, day)
+	}
+	return days
+}
+
+// copyAllowlistedStrings copies the named text fields when present and within
+// the size bound. An over-long value is dropped rather than truncated: a
+// truncated timestamp would be a wrong value where an absent one is merely
+// unknown, and truncating is not a bound an exfiltration attempt respects.
+func copyAllowlistedStrings(dst, src map[string]any, fields []string) {
+	for _, field := range fields {
+		value, ok := src[field].(string)
+		if !ok || len(value) > maxPluginQuotaTextBytes {
+			continue
+		}
+		dst[field] = value
+	}
+}
+
+// copyAllowlistedNumbers copies the named numeric fields. A value of any other
+// JSON type is dropped rather than coerced.
+func copyAllowlistedNumbers(dst, src map[string]any, fields []string) {
+	for _, field := range fields {
+		if value, ok := src[field].(float64); ok {
+			dst[field] = value
+		}
+	}
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
