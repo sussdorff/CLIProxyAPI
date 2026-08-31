@@ -18,6 +18,18 @@ RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.V
 
 FROM debian:bookworm
 
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG SOURCE=unknown
+ARG CREATED=unknown
+
+LABEL org.opencontainers.image.title="CLIProxyAPI" \
+      org.opencontainers.image.description="CLIProxyAPI fork build" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.source="$SOURCE" \
+      org.opencontainers.image.created="$CREATED"
+
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /CLIProxyAPI
