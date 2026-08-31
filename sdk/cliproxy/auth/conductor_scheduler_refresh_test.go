@@ -45,6 +45,17 @@ func (e unauthorizedRefreshTestExecutor) Refresh(ctx context.Context, auth *Auth
 	return nil, errors.New("token refresh failed with status 401: invalid_grant")
 }
 
+type nextRefreshAfterTestExecutor struct {
+	schedulerProviderTestExecutor
+	nextRefreshAfter time.Time
+}
+
+func (e nextRefreshAfterTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	updated := auth.Clone()
+	updated.NextRefreshAfter = e.nextRefreshAfter
+	return updated, nil
+}
+
 func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -87,6 +98,44 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_RefreshAuthPreservesReturnedNextRefreshAfter(t *testing.T) {
+	ctx := context.Background()
+	nextRefreshAfter := time.Now().Add(time.Hour).UTC()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(nextRefreshAfterTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "cursor-acp"},
+		nextRefreshAfter:              nextRefreshAfter,
+	})
+
+	auth := &Auth{
+		ID:       "returned-next-refresh-after",
+		Provider: "cursor-acp",
+		Metadata: map[string]any{"email": "x@example.com"},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	updated, errRefresh := manager.refreshAuthForRequest(ctx, auth.ID, "")
+	if errRefresh != nil {
+		t.Fatalf("refresh auth: %v", errRefresh)
+	}
+	if updated == nil {
+		t.Fatal("refresh auth returned nil auth")
+	}
+	if !updated.NextRefreshAfter.Equal(nextRefreshAfter) {
+		t.Fatalf("returned NextRefreshAfter = %s, want %s", updated.NextRefreshAfter, nextRefreshAfter)
+	}
+
+	saved, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if !saved.NextRefreshAfter.Equal(nextRefreshAfter) {
+		t.Fatalf("saved NextRefreshAfter = %s, want %s", saved.NextRefreshAfter, nextRefreshAfter)
 	}
 }
 

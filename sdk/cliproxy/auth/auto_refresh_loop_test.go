@@ -88,6 +88,58 @@ func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 	}
 }
 
+func TestNextRefreshAfterControlsSchedulingAndDueRefresh(t *testing.T) {
+	deadline := time.Date(2026, 4, 12, 0, 30, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:               "a1",
+		Provider:         "test",
+		NextRefreshAfter: deadline,
+		Metadata:         map[string]any{"email": "x@example.com"},
+	}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+
+	testCases := []struct {
+		name        string
+		now         time.Time
+		wantNext    time.Time
+		wantRefresh bool
+	}{
+		{
+			name:        "before deadline schedules the refresh",
+			now:         deadline.Add(-time.Second),
+			wantNext:    deadline,
+			wantRefresh: false,
+		},
+		{
+			name:        "at deadline is due",
+			now:         deadline,
+			wantNext:    deadline,
+			wantRefresh: true,
+		},
+		{
+			name:        "after deadline is due",
+			now:         deadline.Add(time.Second),
+			wantNext:    deadline.Add(time.Second),
+			wantRefresh: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			gotNext, scheduled := nextRefreshCheckAt(testCase.now, auth, 15*time.Minute)
+			if !scheduled {
+				t.Fatal("nextRefreshCheckAt() scheduled = false, want true")
+			}
+			if !gotNext.Equal(testCase.wantNext) {
+				t.Fatalf("nextRefreshCheckAt() = %s, want %s", gotNext, testCase.wantNext)
+			}
+			if gotRefresh := manager.shouldRefresh(auth, testCase.now); gotRefresh != testCase.wantRefresh {
+				t.Fatalf("shouldRefresh() = %t, want %t", gotRefresh, testCase.wantRefresh)
+			}
+		})
+	}
+}
+
 func TestNextRefreshCheckAt_PreferredInterval_PicksEarliestCandidate(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	expiry := now.Add(20 * time.Minute)
