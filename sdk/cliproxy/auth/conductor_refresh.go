@@ -118,8 +118,8 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(a) {
 		return false
 	}
-	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
-		return false
+	if !a.NextRefreshAfter.IsZero() {
+		return !now.Before(a.NextRefreshAfter)
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
