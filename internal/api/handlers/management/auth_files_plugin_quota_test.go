@@ -448,7 +448,7 @@ func TestPluginQuotaMetadataProjectsSpendAndDailyAllowlist(t *testing.T) {
 		t.Fatal("contract with spend was rejected")
 	}
 	spend, _ := quota["spend"].(map[string]any)
-	if spend["metered_cents"] != float64(98655) || spend["cookie"] != nil {
+	if spend["metered_cents"] != json.Number("98655") || spend["cookie"] != nil {
 		t.Fatalf("spend projection = %#v", spend)
 	}
 	daily, _ := quota["daily"].([]any)
@@ -530,11 +530,25 @@ func TestPluginQuotaMetadataDropsNonnumericTokenCounters(t *testing.T) {
 	if _, exists := spend["period_tokens"]; exists {
 		t.Fatalf("object token counter was published: %#v", spend)
 	}
-	if spend["metered_cents"] != float64(42) {
+	if spend["metered_cents"] != json.Number("42") {
 		t.Fatalf("numeric spend counter was not preserved: %#v", spend)
 	}
 	daily := quota["daily"].([]any)
 	if _, exists := daily[0].(map[string]any)["tokens"]; exists {
 		t.Fatalf("array token counter was published: %#v", daily[0])
+	}
+}
+
+func TestPluginQuotaMetadataPreservesExactLargeCounters(t *testing.T) {
+	const exact = "9007199254740993"
+	payload := pluginQuotaContractFixture()
+	payload["spend"] = map[string]any{"period_tokens": json.Number(exact)}
+	quota, ok := pluginQuotaMetadata(payload)
+	if !ok {
+		t.Fatal("valid quota contract was rejected")
+	}
+	spend := quota["spend"].(map[string]any)
+	if spend["period_tokens"] != json.Number(exact) {
+		t.Fatalf("period_tokens = %#v, want exact JSON number %s", spend["period_tokens"], exact)
 	}
 }

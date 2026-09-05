@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -522,8 +523,9 @@ func pluginQuotaMetadata(raw any) (map[string]any, bool) {
 	if schema, _ := payload["schema"].(string); schema != pluginQuotaSchema {
 		return nil, false
 	}
-	version, okVersion := payload["version"].(float64)
-	if !okVersion || version != pluginQuotaSupportedVersion {
+	versionNumber, okVersion := payload["version"].(json.Number)
+	version, errVersion := versionNumber.Float64()
+	if !okVersion || errVersion != nil || version != pluginQuotaSupportedVersion {
 		return nil, false
 	}
 	availability, okAvailability := payload["availability"].(string)
@@ -567,8 +569,10 @@ func decodePluginQuotaPayload(raw any) (map[string]any, bool) {
 	if errMarshal != nil || len(encoded) > maxPluginQuotaMetadataBytes {
 		return nil, false
 	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
 	var payload map[string]any
-	if errUnmarshal := json.Unmarshal(encoded, &payload); errUnmarshal != nil {
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
 		return nil, false
 	}
 	return payload, true
@@ -662,7 +666,11 @@ func copyAllowlistedStrings(dst, src map[string]any, fields []string) {
 // JSON type is dropped rather than coerced.
 func copyAllowlistedNumbers(dst, src map[string]any, fields []string) {
 	for _, field := range fields {
-		if value, ok := src[field].(float64); ok {
+		value, ok := src[field].(json.Number)
+		if !ok {
+			continue
+		}
+		if _, errParse := value.Float64(); errParse == nil {
 			dst[field] = value
 		}
 	}
