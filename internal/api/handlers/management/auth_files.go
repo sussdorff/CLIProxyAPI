@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -544,7 +545,15 @@ func pluginQuotaMetadata(raw any) (map[string]any, bool) {
 	if daily := projectPluginQuotaDaily(payload["daily"]); len(daily) > 0 {
 		projected["daily"] = daily
 	}
-	return projected, true
+	sanitized, ok := htmlsanitize.JSONValue(projected).(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	encoded, errMarshal := json.Marshal(sanitized)
+	if errMarshal != nil || len(encoded) > maxPluginQuotaMetadataBytes {
+		return nil, false
+	}
+	return sanitized, true
 }
 
 // decodePluginQuotaPayload detaches the plugin's value through a bounded JSON

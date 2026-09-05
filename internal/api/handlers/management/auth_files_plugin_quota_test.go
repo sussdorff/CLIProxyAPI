@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -469,5 +470,71 @@ func TestPluginQuotaMetadataKeepsEncodedSizeBound(t *testing.T) {
 	payload["windows"] = windows
 	if got, ok := pluginQuotaMetadata(payload); ok {
 		t.Fatalf("oversized contract accepted: %d windows", len(got["windows"].([]any)))
+	}
+}
+
+func TestPluginQuotaMetadataSanitizesBeforeEnforcingEncodedSizeBound(t *testing.T) {
+	payload := pluginQuotaContractFixture()
+	windows := make([]any, 0, maxPluginQuotaWindows)
+	for i := 0; i < maxPluginQuotaWindows; i++ {
+		windows = append(windows, map[string]any{
+			"id":    fmt.Sprintf("window-%d", i),
+			"label": strings.Repeat("'", 200),
+			"kind":  strings.Repeat("'", 200),
+			"unit":  strings.Repeat("'", 200),
+		})
+	}
+	payload["windows"] = windows
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		t.Fatalf("marshal raw quota: %v", errMarshal)
+	}
+	if len(encoded) >= maxPluginQuotaMetadataBytes {
+		t.Fatalf("raw quota size = %d, want below %d", len(encoded), maxPluginQuotaMetadataBytes)
+	}
+	if got, ok := pluginQuotaMetadata(payload); ok {
+		t.Fatalf("quota expanded beyond the sanitized size limit was accepted: %#v", got)
+	}
+}
+
+func TestPluginQuotaMetadataSanitizesAllowlistedStrings(t *testing.T) {
+	payload := pluginQuotaContractFixture()
+	payload["provider"] = "<script>alert('quota')</script>"
+	quota, ok := pluginQuotaMetadata(payload)
+	if !ok {
+		t.Fatal("valid quota contract was rejected")
+	}
+	if quota["provider"] != html.EscapeString(payload["provider"].(string)) {
+		t.Fatalf("provider was not sanitized: %#v", quota["provider"])
+	}
+}
+
+func TestPluginQuotaMetadataDropsNonnumericTokenCounters(t *testing.T) {
+	payload := pluginQuotaContractFixture()
+	payload["spend"] = map[string]any{
+		"latest_tokens": "secret-token-value",
+		"period_tokens": map[string]any{"value": 1},
+		"metered_cents": 42,
+	}
+	payload["daily"] = []any{
+		map[string]any{"date": "2026-08-26", "cost_cents": 12, "tokens": []any{1}},
+	}
+	quota, ok := pluginQuotaMetadata(payload)
+	if !ok {
+		t.Fatal("valid quota contract was rejected")
+	}
+	spend := quota["spend"].(map[string]any)
+	if _, exists := spend["latest_tokens"]; exists {
+		t.Fatalf("string token counter was published: %#v", spend)
+	}
+	if _, exists := spend["period_tokens"]; exists {
+		t.Fatalf("object token counter was published: %#v", spend)
+	}
+	if spend["metered_cents"] != float64(42) {
+		t.Fatalf("numeric spend counter was not preserved: %#v", spend)
+	}
+	daily := quota["daily"].([]any)
+	if _, exists := daily[0].(map[string]any)["tokens"]; exists {
+		t.Fatalf("array token counter was published: %#v", daily[0])
 	}
 }
