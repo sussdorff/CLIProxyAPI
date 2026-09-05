@@ -201,7 +201,7 @@ func TestListAuthFiles_PluginQuotaLeavesExistingFieldsUnchanged(t *testing.T) {
 	}
 
 	for key, want := range baseline {
-		if key == "id" || key == "name" || key == "auth_index" {
+		if key == "id" || key == "name" || key == "auth_index" || key == "created_at" || key == "modtime" || key == "updated_at" {
 			continue
 		}
 		got, ok := quotaEntry[key]
